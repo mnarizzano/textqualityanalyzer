@@ -1,94 +1,77 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Any, Dict, Optional
+"""FastAPI entry point for the Italian Text Quality Analyzer backend.
 
-from writing_service import WritingService
+This file intentionally contains only web-server concerns: route definitions,
+CORS configuration, input validation, and the call into the analysis pipeline."""
 
+from __future__ import annotations
 
-app = FastAPI()
-service = WritingService()
+from typing import Any, Dict
 
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-class AnalyzeRequest(BaseModel):
-    text: str
+from text_quality.analysis_pipeline import run_text_quality_analysis
+from text_quality.config import BASE_VOCABULARY_PATH, SPACY_MODEL_NAME
+from text_quality.models import AnalyzeRequest
+from text_quality.resources import BASE_VOCABULARY, nlp
 
+# The FastAPI application is intentionally kept in this small file.
+# This makes deployment simple: uvicorn main:app --reload
+app = FastAPI(
+    title="Italian Text Quality Analyzer - spaCy Backend",
+    description=(
+        "A prototype NLP backend for the Google Docs Text Quality Analyzer. "
+        "It adds spaCy-based linguistic analysis, target-audience interpretation, "
+        "Base Vocabulary coverage, possible misspelling signals, named entities, "
+        "paragraph analysis, and a prototype Syntactic Complexity Index."
+    ),
+    version="0.5.0",
+)
 
-class RewriteRequest(BaseModel):
-    text: str
-    mode: str = "concise"
-    decisions: Optional[Dict[str, str]] = None
-    analysis: Optional[Dict[str, Any]] = None
-
-
-class PreviewRequest(BaseModel):
-    text: str
-    decisions: Optional[Dict[str, str]] = None
-    analysis: Optional[Dict[str, Any]] = None
+# The Google Docs Apps Script calls this backend from a browser-like environment.
+# CORS is open for the prototype/ngrok workflow; restrict this in production.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
-def home():
+def root() -> Dict[str, str]:
+    """Return a minimal status message for a browser health check."""
     return {
-        "message": "Italian Text Quality API is running"
+        "message": "Italian Text Quality Analyzer spaCy backend is running.",
+        "docs": "Open /docs to test the API interactively.",
+    }
+
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    """Expose runtime information used to check deployment readiness."""
+    return {
+        "status": "ok",
+        "spacy_model": SPACY_MODEL_NAME,
+        "pipeline": nlp.pipe_names,
+        "base_vocabulary_loaded": bool(BASE_VOCABULARY),
+        "base_vocabulary_size": len(BASE_VOCABULARY),
+        "base_vocabulary_path": str(BASE_VOCABULARY_PATH),
     }
 
 
 @app.post("/analyze")
-def analyze_text_endpoint(request: AnalyzeRequest):
-    result = service.analyze_only(
-        request.text,
-        fast=True,
+def analyze(request: AnalyzeRequest) -> Dict[str, Any]:
+    """Analyze the full Google Docs text and return the sidebar-compatible payload."""
+    text = request.text.strip()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is empty.")
+
+    return run_text_quality_analysis(
+        request=request,
+        nlp_model=nlp,
+        base_vocabulary=BASE_VOCABULARY,
+        base_vocabulary_path=BASE_VOCABULARY_PATH,
     )
-
-    return {
-        "success": True,
-        "original": result["original"],
-        "grammar_corrected": result["grammar_corrected"],
-        "polished": result["polished"],
-        "pleonasm_cleaned": result["pleonasm_cleaned"],
-
-        "grammar_matches": result["grammar_matches"],
-        "grammar_metrics": result["grammar_metrics_before_rewrite"],
-
-        "repetition_analysis": result["repetition_analysis"],
-        "redundancy_report": result["redundancy_report"],
-
-        "user_choice_candidates": result["user_choice_candidates"],
-        "merge_candidates": result["merge_candidates"],
-        "review_options": result["review_options"],
-    }
-
-
-@app.post("/rewrite")
-def rewrite_text_endpoint(request: RewriteRequest):
-    result = service.rewrite_after_analysis(
-        text=request.text,
-        mode=request.mode,
-        decisions=request.decisions or {},
-        final_check=False,
-        analysis=request.analysis,
-    )
-
-    return {
-        "success": True,
-        "rewritten": result["rewritten"],
-        "final": result["final"],
-        "final_grammar_matches": result["final_grammar_matches"],
-        "metrics": result["final_metrics"],
-        "decision_summary": result["decision_summary"],
-    }
-
-
-@app.post("/preview")
-def preview_text_endpoint(request: PreviewRequest):
-    result = service.preview_after_analysis(
-        text=request.text,
-        decisions=request.decisions or {},
-        analysis=request.analysis,
-    )
-
-    return {
-        "success": True,
-        "final": result["final"],
-        "decision_summary": result["decision_summary"],
-    }
